@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "id": "church-calendar",
+      "name": "Church Calendar",
+      "role": "display service",
+      "repository": "https://github.com/MikeKemmerer/church-calendar.git",
+      "branch": "master",
+      "installer": ["./install.sh"],
+      "platforms": ["raspbian", "ubuntu"]
+    },
+    {
+      "id": "videokiosk2",
+      "name": "Video Kiosk 2",
+      "role": "HDMI kiosk",
+      "repository": "https://github.com/MikeKemmerer/videokiosk2.git",
+      "branch": "master",
+      "installer": ["bash", "videokiosk2-installer.sh"],
+      "platforms": ["raspbian", "ubuntu"]
+    },
+    {
+      "id": "cameras",
+      "name": "Camera Control",
+      "role": "camera dashboard",
+      "repository": "https://github.com/MikeKemmerer/cameras.git",
+      "branch": "master",
+      "installer": ["./install.sh"],
+      "platforms": ["raspbian", "ubuntu"]
+    },
+    {
+      "id": "church-monitoring-server",
+      "name": "Church Monitoring Server",
+      "role": "monitoring server",
+      "repository": "https://github.com/MikeKemmerer/church-monitoring.git",
+      "branch": "master",
+      "installer": ["./server/install.sh"],
+      "platforms": ["raspbian", "ubuntu"]
+    },
+    {
+      "id": "church-monitoring-client",
+      "name": "Church Monitoring Client",
+      "role": "monitoring agent",
+      "repository": "https://github.com/MikeKemmerer/church-monitoring.git",
+      "branch": "master",
+      "installer": ["./client/install.sh"],
+      "platforms": ["raspbian", "ubuntu"]
+    }
+  ]
+}
