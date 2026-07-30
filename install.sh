@@ -16,6 +16,8 @@ DRY_RUN=0
 NON_INTERACTIVE=0
 ASSUME_YES=0
 FRESH=0
+REPAIR_APPARMOR=0
+CONFIGURE_APPARMOR=0
 SERVICES_CSV=""
 ENABLE_X11_FORWARDING=0
 DISABLE_X11_FORWARDING=0
@@ -42,6 +44,8 @@ Install or prepare church AV services on Raspberry Pi OS or Ubuntu 26.04.
 Options:
   --services NAME[,NAME...]  Select services by catalog identifier.
   --fresh                    Install selected services from their trusted catalog entry.
+    --configure-apparmor       Configure Ubuntu AppArmor after a fresh installation.
+    --repair-apparmor          Detect installed services and repair their Ubuntu AppArmor setup.
     --kiosk-user USER          Run videokiosk2 as this existing desktop user.
         --kiosk-install-dir PATH   Store videokiosk2 runtime scripts here (default: /opt/videokiosk2).
         --kiosk-config-dir PATH    Store videokiosk2 configuration here (default: /etc/videokiosk2).
@@ -214,6 +218,76 @@ run_service_installer() {
     )
 }
 
+unit_is_installed() {
+    local unit_name="$1"
+    local load_state
+
+    load_state=$(systemctl show "$unit_name" -p LoadState --value 2>/dev/null || true)
+    [[ -n "$load_state" && "$load_state" != "not-found" ]]
+}
+
+checkout_service_for_repair() {
+    local service_id="$1"
+    local repository branch checkout_dir
+
+    repository=$(jq -r --arg id "$service_id" \
+        '.services[] | select(.id == $id) | .repository' "$CATALOG_PATH")
+    branch=$(jq -r --arg id "$service_id" \
+        '.services[] | select(.id == $id) | .branch' "$CATALOG_PATH")
+    checkout_dir="/opt/church-service-installer/checkouts/$service_id"
+    checkout_trusted_repository "$repository" "$branch" "$checkout_dir"
+    printf '%s\n' "$checkout_dir"
+}
+
+repair_apparmor() {
+    local checkout_dir
+    local detected=0
+
+    if [[ "$PLATFORM_ID" != "ubuntu" ]]; then
+        info "AppArmor repair is Ubuntu-only; no changes are needed on $PLATFORM_LABEL."
+        return
+    fi
+
+    if unit_is_installed church-calendar.service; then
+        info "Detected church-calendar.service; repairing its AppArmor profile."
+        checkout_dir=$(checkout_service_for_repair church-calendar)
+        (cd "$checkout_dir" && ./install.sh --configure-apparmor-only)
+        detected=1
+    fi
+
+    if unit_is_installed videokiosk2.service; then
+        info "Detected videokiosk2.service; repairing its AppArmor profile."
+        checkout_dir=$(checkout_service_for_repair videokiosk2)
+        (cd "$checkout_dir" && bash videokiosk2-installer.sh --configure-apparmor-only)
+        detected=1
+    fi
+
+    if [[ -d /usr/lib/cgi-bin/church-monitoring-server && \
+        -f /etc/church-monitoring/server-config.json ]]; then
+        info "Detected Church Monitoring server CGI; repairing its AppArmor hat."
+        checkout_dir=$(checkout_service_for_repair church-monitoring-server)
+        (cd "$checkout_dir" && ./configure-apparmor.sh --role server)
+        detected=1
+    fi
+
+    if [[ -d /usr/lib/cgi-bin/church-monitoring-client && \
+        -f /etc/church-monitoring/client-config.json ]]; then
+        info "Detected Church Monitoring client CGI; repairing its AppArmor hat."
+        checkout_dir=$(checkout_service_for_repair church-monitoring-client)
+        (cd "$checkout_dir" && ./configure-apparmor.sh --role client)
+        detected=1
+    fi
+
+    if [[ -d /var/www/html/cameracontrol && -d /var/www/html/multicamera ]]; then
+        info "Detected Camera Control; repairing its Apache AppArmor hat."
+        checkout_dir=$(checkout_service_for_repair church-monitoring-server)
+        (cd "$checkout_dir" && ./configure-apparmor.sh --role cameras)
+        detected=1
+    fi
+
+    [[ $detected -eq 1 ]] || info "No installed AppArmor-enabled services were detected."
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --services)
@@ -222,6 +296,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fresh)
             FRESH=1
+            shift
+            ;;
+        --repair-apparmor)
+            REPAIR_APPARMOR=1
+            shift
+            ;;
+        --configure-apparmor)
+            CONFIGURE_APPARMOR=1
             shift
             ;;
         --kiosk-user)
@@ -323,7 +405,7 @@ done
 require_command jq
 [[ -f "$CATALOG_PATH" ]] || die "Missing service catalog: $CATALOG_PATH"
 
-if [[ -z "$SERVICES_CSV" && ! has_host_actions ]]; then
+if [[ -z "$SERVICES_CSV" && ! has_host_actions && $REPAIR_APPARMOR -eq 0 ]]; then
     [[ $NON_INTERACTIVE -eq 0 ]] || die "--non-interactive requires --services or a host action."
     read_interactive_selection
 fi
@@ -334,6 +416,15 @@ if [[ -n "$SERVICES_CSV" ]]; then
     validate_selection
     resolve_kiosk_user
     resolve_calendar_user
+fi
+if [[ $REPAIR_APPARMOR -eq 1 && ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
+    die "--repair-apparmor detects installed services; do not combine it with --services."
+fi
+if [[ $REPAIR_APPARMOR -eq 1 && $CONFIGURE_APPARMOR -eq 1 ]]; then
+    die "Choose either --configure-apparmor after a fresh installation or --repair-apparmor."
+fi
+if [[ $CONFIGURE_APPARMOR -eq 1 && ${#SELECTED_SERVICES[@]} -eq 0 ]]; then
+    die "--configure-apparmor requires --services and --fresh."
 fi
 detect_platform
 validate_supported_platform
@@ -347,6 +438,13 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     [[ -n "$CALENDAR_USER" ]] && echo "Calendar destination: $CALENDAR_DEST"
 else
     echo "Platform: $PLATFORM_LABEL ($PLATFORM_ARCH)"
+fi
+
+if [[ $REPAIR_APPARMOR -eq 1 ]]; then
+    echo "Requested action: repair detected AppArmor configurations"
+fi
+if [[ $CONFIGURE_APPARMOR -eq 1 ]]; then
+    echo "Requested action: configure AppArmor after installation"
 fi
 
 if has_host_actions; then
@@ -394,8 +492,16 @@ if [[ $DISABLE_VNC -eq 1 ]]; then
     disable_x11vnc
 fi
 
+if [[ $REPAIR_APPARMOR -eq 1 ]]; then
+    repair_apparmor
+fi
+
 for service_id in "${SELECTED_SERVICES[@]}"; do
     run_service_installer "$service_id"
 done
+
+if [[ $CONFIGURE_APPARMOR -eq 1 ]]; then
+    repair_apparmor
+fi
 
 info "Installation completed."

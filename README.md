@@ -26,6 +26,41 @@ cd church-service-installer
 sudo ./install.sh --services church-calendar,cameras --fresh
 ```
 
+### Camera Control And Monitoring
+
+Install Camera Control and the Church Monitoring server together on the
+dashboard host. Camera Control uses Apache's default port 80 vhost; the
+Monitoring server uses port 8080:
+
+```bash
+sudo ./install.sh --services cameras,church-monitoring-server --fresh --configure-apparmor
+```
+
+Save the enrollment token printed by the server installer. On every monitored
+host, install the Monitoring client separately and provide that server address
+and token when prompted:
+
+```bash
+sudo ./install.sh --services church-monitoring-client --fresh
+```
+
+Do not select both Monitoring roles on one host; they share
+`/etc/church-monitoring`. The optional `--configure-apparmor` flag configures
+separate Apache hats for Camera Control and any installed Monitoring role after
+a fresh Ubuntu installation. The repair command configures the same hats for an
+existing deployment:
+
+```bash
+sudo ./install.sh --repair-apparmor
+```
+
+Both flows let Camera Control and Monitoring run on the dashboard host without
+replacing one another's policy:
+
+This command detects installed services, refreshes their trusted catalog
+checkouts, and reapplies their policy and systemd/Apache attachment. On
+Raspberry Pi OS it reports a no-op; it does not install or require AppArmor.
+
 Validate the selected services and host without changing the machine:
 
 ```bash
