@@ -21,8 +21,8 @@ detect_platform() {
         raspbian)
             PLATFORM_LABEL="Raspberry Pi OS $PLATFORM_VERSION"
             ;;
-        ubuntu)
-            PLATFORM_LABEL="Ubuntu $PLATFORM_VERSION"
+        debian)
+            PLATFORM_LABEL="Debian $PLATFORM_VERSION"
             ;;
         *)
             PLATFORM_LABEL="${PRETTY_NAME:-$PLATFORM_ID $PLATFORM_VERSION}"
@@ -35,13 +35,13 @@ validate_supported_platform() {
         raspbian)
             return 0
             ;;
-        ubuntu)
-            [[ "$PLATFORM_VERSION" == "26.04" ]] || \
-                die "Ubuntu $PLATFORM_VERSION is unsupported; Ubuntu 26.04 is required."
+        debian)
+            [[ "$PLATFORM_VERSION" =~ ^[0-9]+$ && "$PLATFORM_VERSION" -ge 12 ]] || \
+                die "Debian $PLATFORM_VERSION is unsupported; Debian 12 or newer is required."
             return 0
             ;;
         *)
-            die "Unsupported operating system: $PLATFORM_LABEL. Use Raspberry Pi OS or Ubuntu 26.04."
+            die "Unsupported operating system: $PLATFORM_LABEL. Use Debian 12 or newer, or Raspberry Pi OS."
             ;;
     esac
 }

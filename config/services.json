@@ -8,7 +8,7 @@
       "repository": "https://github.com/MikeKemmerer/church-calendar.git",
       "branch": "master",
       "installer": ["./install.sh"],
-      "platforms": ["raspbian", "ubuntu"]
+      "platforms": ["raspbian", "debian"]
     },
     {
       "id": "videokiosk2",
@@ -17,7 +17,7 @@
       "repository": "https://github.com/MikeKemmerer/videokiosk2.git",
       "branch": "master",
       "installer": ["bash", "videokiosk2-installer.sh"],
-      "platforms": ["raspbian", "ubuntu"]
+      "platforms": ["raspbian", "debian"]
     },
     {
       "id": "cameras",
@@ -26,7 +26,7 @@
       "repository": "https://github.com/MikeKemmerer/cameras.git",
       "branch": "master",
       "installer": ["./install.sh"],
-      "platforms": ["raspbian", "ubuntu"]
+      "platforms": ["raspbian", "debian"]
     },
     {
       "id": "church-monitoring-server",
@@ -35,7 +35,7 @@
       "repository": "https://github.com/MikeKemmerer/church-monitoring.git",
       "branch": "master",
       "installer": ["./server/install.sh"],
-      "platforms": ["raspbian", "ubuntu"]
+      "platforms": ["raspbian", "debian"]
     },
     {
       "id": "church-monitoring-client",
@@ -44,7 +44,7 @@
       "repository": "https://github.com/MikeKemmerer/church-monitoring.git",
       "branch": "master",
       "installer": ["./client/install.sh"],
-      "platforms": ["raspbian", "ubuntu"]
+      "platforms": ["raspbian", "debian"]
     }
   ]
 }

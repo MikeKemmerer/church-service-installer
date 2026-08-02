@@ -3,11 +3,18 @@
 
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/platform.sh
 source "$SCRIPT_DIR/lib/platform.sh"
+# shellcheck source=lib/tui.sh
+source "$SCRIPT_DIR/lib/tui.sh"
+# shellcheck source=lib/state.sh
+source "$SCRIPT_DIR/lib/state.sh"
+# shellcheck source=lib/desktop.sh
+source "$SCRIPT_DIR/lib/desktop.sh"
 # shellcheck source=lib/remote-access.sh
 source "$SCRIPT_DIR/lib/remote-access.sh"
 
@@ -21,8 +28,6 @@ CONFIGURE_APPARMOR=0
 SERVICES_CSV=""
 ENABLE_X11_FORWARDING=0
 DISABLE_X11_FORWARDING=0
-KEY_ONLY_USER=""
-CONFIRM_KEY_LOGIN=0
 ENABLE_VNC=0
 DISABLE_VNC=0
 VNC_ALLOW=""
@@ -32,14 +37,25 @@ ALLOW_UNFIREWALLED_VNC=0
 KIOSK_USER=""
 KIOSK_INSTALL_DIR="/opt/videokiosk2"
 KIOSK_CONFIG_DIR="/etc/videokiosk2"
+KIOSK_FEED_URL=""
+KIOSK_BROWSER_URL=""
+KIOSK_SCHEDULE_URL=""
+KIOSK_RESTART_DELAY_MINUTES=""
+KIOSK_GPIO_ENABLED=""
+KIOSK_GPIO_PIN=""
+KIOSK_AUDIO_OUTPUT="auto"
+KIOSK_ALSA_AUDIO_DEVICE=""
 CALENDAR_USER=""
 CALENDAR_DEST="/opt/church-calendar"
+MENU_MODE="auto"
+BOOTSTRAP_APT_GET="${BOOTSTRAP_APT_GET:-apt-get}"
+LIST_SERVICES=0
 
 usage() {
     cat <<'EOF'
 Usage: sudo ./install.sh [options]
 
-Install or prepare church AV services on Raspberry Pi OS or Ubuntu 26.04.
+Install or prepare church AV services on Debian 12+ or Raspberry Pi OS.
 
 Options:
   --services NAME[,NAME...]  Select services by catalog identifier.
@@ -47,14 +63,20 @@ Options:
     --configure-apparmor       Configure Ubuntu AppArmor after a fresh installation.
     --repair-apparmor          Detect installed services and repair their Ubuntu AppArmor setup.
     --kiosk-user USER          Run videokiosk2 as this existing desktop user.
-        --kiosk-install-dir PATH   Store videokiosk2 runtime scripts here (default: /opt/videokiosk2).
-        --kiosk-config-dir PATH    Store videokiosk2 configuration here (default: /etc/videokiosk2).
+    --kiosk-install-dir PATH   Store videokiosk2 runtime scripts here (default: /opt/videokiosk2).
+    --kiosk-config-dir PATH    Store videokiosk2 configuration here (default: /etc/videokiosk2).
+    --kiosk-feed-url URL       Set the VLC video feed URL.
+    --kiosk-browser-url URL    Set the Falkon failover URL.
+    --kiosk-schedule-url URL   Set the scheduled-restart API URL.
+    --kiosk-restart-delay-minutes MINUTES  Delay scheduled restarts.
+    --kiosk-audio-output MODE  Select auto or alsa audio output (default: auto).
+    --kiosk-alsa-audio-device DEVICE  ALSA device used with --kiosk-audio-output alsa.
+    --kiosk-gpio-pin PIN       Install the GPIO restart button on this pin.
+    --kiosk-no-gpio            Do not install the GPIO restart button.
     --calendar-user USER       Run church-calendar as this existing service user.
     --calendar-dest PATH       Install church-calendar here (default: /opt/church-calendar).
     --enable-x11-forwarding    Enable SSH X11 forwarding with an owned SSH drop-in.
     --disable-x11-forwarding   Remove the installer-owned SSH X11 forwarding drop-in.
-    --enable-key-only USER     Disable SSH password login for a verified management user.
-    --confirm-key-login        Confirm that a second key-authenticated SSH session works.
     --with-vnc                 Install an x11vnc server attached to the HDMI X11 display.
     --disable-vnc              Remove the installer-owned x11vnc service.
     --vnc-allow CIDR           Allow direct VNC access only from this IPv4 address or CIDR.
@@ -62,8 +84,9 @@ Options:
     --vnc-password-file PATH   Read the VNC password from a root-readable local file.
     --allow-unfirewalled-vnc   Permit VNC when no supported firewall is active.
   --dry-run                  Validate platform and selection without changing the host.
+    --menu-mode MODE           Use auto, whiptail, text, or none for interactive menus.
   --non-interactive          Require all choices through command-line options.
-  --yes                      Confirm the requested action without a prompt.
+    --yes                      Approve installer and prerequisite prompts.
   --list-services            Print service identifiers and exit.
   -h, --help                 Show this help text.
 
@@ -74,6 +97,50 @@ EOF
 
 list_services() {
     jq -r '.services[] | "\(.id)\t\(.name)\t\(.role)"' "$CATALOG_PATH"
+}
+
+bootstrap_dependencies() {
+    local -a missing_packages=()
+    local confirmation
+
+    if [[ ",${BOOTSTRAP_FORCE_MISSING:-}," == *,jq,* ]] || ! command -v jq >/dev/null 2>&1; then
+        missing_packages+=(jq)
+    fi
+    if [[ ",${BOOTSTRAP_FORCE_MISSING:-}," == *,git,* ]] || ! command -v git >/dev/null 2>&1; then
+        missing_packages+=(git)
+    fi
+    if [[ ",${BOOTSTRAP_FORCE_MISSING:-}," == *,whiptail,* ]] || ! command -v whiptail >/dev/null 2>&1; then
+        missing_packages+=(whiptail)
+    fi
+    [[ ${#missing_packages[@]} -eq 0 ]] && return 0
+
+    if [[ $EUID -ne 0 ]]; then
+        command -v sudo >/dev/null 2>&1 || die \
+            "Install bootstrap packages first as root: jq git whiptail"
+        info "Installer prerequisites are missing; restarting with sudo."
+        exec sudo --preserve-env=OS_RELEASE_FILE,BOOTSTRAP_APT_GET "$0" "${ORIGINAL_ARGS[@]}"
+    fi
+    command -v "$BOOTSTRAP_APT_GET" >/dev/null 2>&1 || \
+        die "Cannot install bootstrap packages: $BOOTSTRAP_APT_GET is unavailable."
+
+    if [[ $ASSUME_YES -eq 0 ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || die \
+            "Missing installer prerequisites: ${missing_packages[*]}. Re-run with --yes to install them."
+        read -r -p "Install installer prerequisites (${missing_packages[*]}) now? [Y/n] " confirmation
+        [[ -z "$confirmation" || "$confirmation" =~ ^[Yy]([Ee][Ss])?$ ]] || \
+            die "Installer prerequisite installation cancelled."
+    fi
+
+    info "Installing installer prerequisites: ${missing_packages[*]}"
+    DEBIAN_FRONTEND=noninteractive "$BOOTSTRAP_APT_GET" update
+    DEBIAN_FRONTEND=noninteractive "$BOOTSTRAP_APT_GET" install -y "${missing_packages[@]}"
+}
+
+restart_as_root() {
+    [[ $EUID -eq 0 || $DRY_RUN -eq 1 || $LIST_SERVICES -eq 1 ]] && return 0
+    command -v sudo >/dev/null 2>&1 || die "Run this installer as root: sudo ./install.sh ..."
+    info "Restarting the guided installer with sudo."
+    exec sudo --preserve-env=OS_RELEASE_FILE,BOOTSTRAP_APT_GET "$0" "${ORIGINAL_ARGS[@]}"
 }
 
 catalog_has_service() {
@@ -127,6 +194,109 @@ resolve_kiosk_user() {
     [[ "$KIOSK_CONFIG_DIR" == /* ]] || die "--kiosk-config-dir must be an absolute path."
 }
 
+kiosk_config_value() {
+    local key="$1"
+    local config_path="$KIOSK_CONFIG_DIR/local.conf"
+
+    [[ -r "$config_path" ]] || return 0
+    sed -n "s/^${key}=\"\([^\"]*\)\"$/\1/p" "$config_path" | head -n 1
+}
+
+show_kiosk_alsa_device_hint() {
+    local hdmi_devices
+
+    echo "To list available ALSA devices later, run: aplay -L"
+    if ! command -v aplay >/dev/null 2>&1; then
+        echo "Install alsa-utils to list device identifiers on this host."
+        return
+    fi
+
+    hdmi_devices=$(aplay -L 2>/dev/null | sed -n '/^hdmi:/p')
+    if [[ -n "$hdmi_devices" ]]; then
+        echo "Available HDMI ALSA devices:"
+        while IFS= read -r device; do
+            echo "  $device"
+        done <<< "$hdmi_devices"
+    else
+        echo "No HDMI ALSA devices were reported by aplay -L."
+    fi
+}
+
+resolve_kiosk_url() {
+    local variable_name="$1"
+    local label="$2"
+    local default_value="$3"
+    local value="${!variable_name}"
+
+    if [[ -z "$value" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || die "--non-interactive videokiosk2 installation requires $label."
+        read -r -p "$label [default: $default_value]: " value
+        value="${value:-$default_value}"
+    fi
+
+    [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "Invalid $label: $value"
+    printf -v "$variable_name" '%s' "$value"
+}
+
+resolve_kiosk_settings() {
+    local feed_default browser_default schedule_default gpio_answer
+
+    selection_has "videokiosk2" || return 0
+
+    feed_default="$(kiosk_config_value STREAM_URL)"
+    browser_default="$(kiosk_config_value BROWSER_URL)"
+    feed_default="${feed_default:-http://your-stream-server:8086/2.ts}"
+    browser_default="${browser_default:-http://your-calendar-server:8000}"
+    resolve_kiosk_url KIOSK_FEED_URL "Video feed URL" "$feed_default"
+    resolve_kiosk_url KIOSK_BROWSER_URL "Failover browser URL" "$browser_default"
+    schedule_default="${KIOSK_BROWSER_URL%/}/api/service-restart-schedule"
+    resolve_kiosk_url KIOSK_SCHEDULE_URL "Restart schedule API URL" "$schedule_default"
+
+    if [[ -z "$KIOSK_RESTART_DELAY_MINUTES" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || die \
+            "--non-interactive videokiosk2 installation requires --kiosk-restart-delay-minutes."
+        read -r -p "Restart delay in minutes [default: 0]: " KIOSK_RESTART_DELAY_MINUTES
+        KIOSK_RESTART_DELAY_MINUTES="${KIOSK_RESTART_DELAY_MINUTES:-0}"
+    fi
+    [[ "$KIOSK_RESTART_DELAY_MINUTES" =~ ^[0-9]+$ ]] || \
+        die "Kiosk restart delay must be a non-negative whole number of minutes."
+
+    [[ "$KIOSK_AUDIO_OUTPUT" == "auto" || "$KIOSK_AUDIO_OUTPUT" == "alsa" ]] || \
+        die "Kiosk audio output must be auto or alsa."
+    if [[ "$KIOSK_AUDIO_OUTPUT" == "alsa" && -z "$KIOSK_ALSA_AUDIO_DEVICE" ]]; then
+        if [[ $NON_INTERACTIVE -eq 1 ]]; then
+            die "--non-interactive ALSA audio requires --kiosk-alsa-audio-device."
+        fi
+        show_kiosk_alsa_device_hint
+        read -r -p "ALSA audio device [default: hdmi:CARD=PCH,DEV=0]: " KIOSK_ALSA_AUDIO_DEVICE
+        KIOSK_ALSA_AUDIO_DEVICE="${KIOSK_ALSA_AUDIO_DEVICE:-hdmi:CARD=PCH,DEV=0}"
+    fi
+
+    if [[ -z "$KIOSK_GPIO_ENABLED" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || die \
+            "--non-interactive videokiosk2 installation requires --kiosk-gpio-pin or --kiosk-no-gpio."
+        read -r -p "Install GPIO button restart monitor? [y/N]: " gpio_answer
+        if [[ "$gpio_answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            KIOSK_GPIO_ENABLED=1
+        else
+            KIOSK_GPIO_ENABLED=0
+        fi
+    fi
+
+    if [[ "$KIOSK_GPIO_ENABLED" == "1" ]]; then
+        if [[ -z "$KIOSK_GPIO_PIN" ]]; then
+            [[ $NON_INTERACTIVE -eq 0 ]] || die \
+                "--non-interactive GPIO restart requires --kiosk-gpio-pin."
+            read -r -p "GPIO pin number [default: 17]: " KIOSK_GPIO_PIN
+            KIOSK_GPIO_PIN="${KIOSK_GPIO_PIN:-17}"
+        fi
+        [[ "$KIOSK_GPIO_PIN" =~ ^[0-9]+$ ]] && (( KIOSK_GPIO_PIN >= 2 && KIOSK_GPIO_PIN <= 27 )) || \
+            die "Invalid GPIO pin: $KIOSK_GPIO_PIN (must be 2-27)."
+    elif [[ -n "$KIOSK_GPIO_PIN" ]]; then
+        die "--kiosk-gpio-pin conflicts with --kiosk-no-gpio."
+    fi
+}
+
 resolve_calendar_user() {
     local default_user
 
@@ -152,11 +322,8 @@ resolve_calendar_user() {
 }
 
 read_interactive_selection() {
-    local selection
-    echo "Available services:"
-    list_services | column -t -s $'\t'
-    read -r -p "Enter comma-separated service identifiers: " selection
-    SERVICES_CSV="$selection"
+    SERVICES_CSV=$(TUI_MENU_MODE="$MENU_MODE" tui_select_services "$CATALOG_PATH") || \
+        die "Service selection cancelled."
 }
 
 parse_services() {
@@ -172,7 +339,7 @@ parse_services() {
 
 has_host_actions() {
     [[ $ENABLE_X11_FORWARDING -eq 1 || $DISABLE_X11_FORWARDING -eq 1 || \
-        -n "$KEY_ONLY_USER" || $ENABLE_VNC -eq 1 || $DISABLE_VNC -eq 1 ]]
+    $ENABLE_VNC -eq 1 || $DISABLE_VNC -eq 1 ]]
 }
 
 print_plan() {
@@ -206,7 +373,22 @@ run_service_installer() {
             --kiosk-user "$KIOSK_USER"
             --install-dir "$KIOSK_INSTALL_DIR"
             --config-dir "$KIOSK_CONFIG_DIR"
+            --feed-url "$KIOSK_FEED_URL"
+            --browser-url "$KIOSK_BROWSER_URL"
+            --schedule-url "$KIOSK_SCHEDULE_URL"
+            --restart-delay-minutes "$KIOSK_RESTART_DELAY_MINUTES"
+            --audio-output "$KIOSK_AUDIO_OUTPUT"
+            --non-interactive
+            --yes
         )
+        if [[ -n "$KIOSK_ALSA_AUDIO_DEVICE" ]]; then
+            installer_command+=(--alsa-audio-device "$KIOSK_ALSA_AUDIO_DEVICE")
+        fi
+        if [[ "$KIOSK_GPIO_ENABLED" == "1" ]]; then
+            installer_command+=(--gpio-pin "$KIOSK_GPIO_PIN")
+        else
+            installer_command+=(--disable-gpio-restart)
+        fi
     fi
     (
         cd "$checkout_dir"
@@ -321,6 +503,47 @@ while [[ $# -gt 0 ]]; do
             [[ -n "$KIOSK_CONFIG_DIR" ]] || die "--kiosk-config-dir requires a path."
             shift 2
             ;;
+        --kiosk-feed-url)
+            KIOSK_FEED_URL="${2:-}"
+            [[ -n "$KIOSK_FEED_URL" ]] || die "--kiosk-feed-url requires a URL."
+            shift 2
+            ;;
+        --kiosk-browser-url)
+            KIOSK_BROWSER_URL="${2:-}"
+            [[ -n "$KIOSK_BROWSER_URL" ]] || die "--kiosk-browser-url requires a URL."
+            shift 2
+            ;;
+        --kiosk-schedule-url)
+            KIOSK_SCHEDULE_URL="${2:-}"
+            [[ -n "$KIOSK_SCHEDULE_URL" ]] || die "--kiosk-schedule-url requires a URL."
+            shift 2
+            ;;
+        --kiosk-restart-delay-minutes)
+            KIOSK_RESTART_DELAY_MINUTES="${2:-}"
+            [[ -n "$KIOSK_RESTART_DELAY_MINUTES" ]] || die "--kiosk-restart-delay-minutes requires minutes."
+            shift 2
+            ;;
+        --kiosk-audio-output)
+            KIOSK_AUDIO_OUTPUT="${2:-}"
+            [[ -n "$KIOSK_AUDIO_OUTPUT" ]] || die "--kiosk-audio-output requires auto or alsa."
+            shift 2
+            ;;
+        --kiosk-alsa-audio-device)
+            KIOSK_ALSA_AUDIO_DEVICE="${2:-}"
+            [[ -n "$KIOSK_ALSA_AUDIO_DEVICE" ]] || die "--kiosk-alsa-audio-device requires a device."
+            shift 2
+            ;;
+        --kiosk-gpio-pin)
+            KIOSK_GPIO_PIN="${2:-}"
+            [[ -n "$KIOSK_GPIO_PIN" ]] || die "--kiosk-gpio-pin requires a pin number."
+            KIOSK_GPIO_ENABLED=1
+            shift 2
+            ;;
+        --kiosk-no-gpio)
+            [[ "$KIOSK_GPIO_ENABLED" != "1" ]] || die "--kiosk-no-gpio conflicts with --kiosk-gpio-pin."
+            KIOSK_GPIO_ENABLED=0
+            shift
+            ;;
         --calendar-user)
             CALENDAR_USER="${2:-}"
             [[ -n "$CALENDAR_USER" ]] || die "--calendar-user requires a user."
@@ -337,15 +560,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --disable-x11-forwarding)
             DISABLE_X11_FORWARDING=1
-            shift
-            ;;
-        --enable-key-only)
-            KEY_ONLY_USER="${2:-}"
-            [[ -n "$KEY_ONLY_USER" ]] || die "--enable-key-only requires a user."
-            shift 2
-            ;;
-        --confirm-key-login)
-            CONFIRM_KEY_LOGIN=1
             shift
             ;;
         --with-vnc)
@@ -379,6 +593,14 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=1
             shift
             ;;
+        --menu-mode)
+            MENU_MODE="${2:-}"
+            case "$MENU_MODE" in
+                auto|whiptail|text|none) ;;
+                *) die "--menu-mode must be auto, whiptail, text, or none." ;;
+            esac
+            shift 2
+            ;;
         --non-interactive)
             NON_INTERACTIVE=1
             shift
@@ -388,9 +610,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --list-services)
-            require_command jq
-            list_services
-            exit 0
+            LIST_SERVICES=1
+            shift
             ;;
         -h|--help)
             usage
@@ -402,11 +623,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+restart_as_root
+bootstrap_dependencies
 require_command jq
 [[ -f "$CATALOG_PATH" ]] || die "Missing service catalog: $CATALOG_PATH"
 
-if [[ -z "$SERVICES_CSV" && ! has_host_actions && $REPAIR_APPARMOR -eq 0 ]]; then
+if [[ $LIST_SERVICES -eq 1 ]]; then
+    list_services
+    exit 0
+fi
+
+if [[ -z "$SERVICES_CSV" && $REPAIR_APPARMOR -eq 0 ]] && ! has_host_actions; then
     [[ $NON_INTERACTIVE -eq 0 ]] || die "--non-interactive requires --services or a host action."
+    [[ "$MENU_MODE" != "none" ]] || die "--menu-mode none requires --services or a host action."
     read_interactive_selection
 fi
 
@@ -415,6 +644,7 @@ if [[ -n "$SERVICES_CSV" ]]; then
     parse_services
     validate_selection
     resolve_kiosk_user
+    resolve_kiosk_settings
     resolve_calendar_user
 fi
 if [[ $REPAIR_APPARMOR -eq 1 && ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
@@ -434,6 +664,16 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     [[ -n "$KIOSK_USER" ]] && echo "Kiosk user: $KIOSK_USER"
     [[ -n "$KIOSK_USER" ]] && echo "Kiosk scripts: $KIOSK_INSTALL_DIR"
     [[ -n "$KIOSK_USER" ]] && echo "Kiosk configuration: $KIOSK_CONFIG_DIR"
+    [[ -n "$KIOSK_USER" ]] && echo "Kiosk feed: $KIOSK_FEED_URL"
+    [[ -n "$KIOSK_USER" ]] && echo "Kiosk failover: $KIOSK_BROWSER_URL"
+    [[ -n "$KIOSK_USER" ]] && echo "Kiosk restart schedule: $KIOSK_SCHEDULE_URL"
+    [[ -n "$KIOSK_USER" ]] && echo "Kiosk restart delay: ${KIOSK_RESTART_DELAY_MINUTES} minute(s)"
+    [[ -n "$KIOSK_USER" ]] && echo "Kiosk audio output: $KIOSK_AUDIO_OUTPUT"
+    [[ -n "$KIOSK_ALSA_AUDIO_DEVICE" ]] && echo "Kiosk ALSA audio device: $KIOSK_ALSA_AUDIO_DEVICE"
+    [[ "$KIOSK_GPIO_ENABLED" == "1" ]] && echo "Kiosk GPIO restart pin: $KIOSK_GPIO_PIN"
+    [[ "$KIOSK_GPIO_ENABLED" == "0" ]] && echo "Kiosk GPIO restart button: disabled"
+    [[ -n "$KIOSK_USER" && "$PLATFORM_ID" == "debian" ]] && \
+        echo "Kiosk desktop: Xorg, LightDM autologin, and Openbox will be provisioned"
     [[ -n "$CALENDAR_USER" ]] && echo "Calendar user: $CALENDAR_USER"
     [[ -n "$CALENDAR_USER" ]] && echo "Calendar destination: $CALENDAR_DEST"
 else
@@ -451,7 +691,6 @@ if has_host_actions; then
     echo "Host actions requested:"
     [[ $ENABLE_X11_FORWARDING -eq 1 ]] && echo "  - Enable SSH X11 forwarding"
     [[ $DISABLE_X11_FORWARDING -eq 1 ]] && echo "  - Disable SSH X11 forwarding"
-    [[ -n "$KEY_ONLY_USER" ]] && echo "  - Enable SSH key-only login for $KEY_ONLY_USER"
     [[ $ENABLE_VNC -eq 1 ]] && echo "  - Enable attached-display VNC"
     [[ $DISABLE_VNC -eq 1 ]] && echo "  - Disable attached-display VNC"
 fi
@@ -469,6 +708,9 @@ if [[ $EUID -ne 0 ]]; then
     die "Run this installer as root: sudo ./install.sh ..."
 fi
 
+state_init
+trap state_exit_trap EXIT
+
 if [[ $ASSUME_YES -eq 0 ]]; then
     read -r -p "Apply the requested service and host changes now? [y/N] " confirmation
     [[ "$confirmation" =~ ^[Yy]([Ee][Ss])?$ ]] || die "Cancelled."
@@ -476,32 +718,42 @@ fi
 
 if [[ $ENABLE_X11_FORWARDING -eq 1 ]]; then
     configure_ssh_x11_forwarding
+    state_checkpoint ssh-x11-forwarding
 fi
 if [[ $DISABLE_X11_FORWARDING -eq 1 ]]; then
     disable_ssh_x11_forwarding
-fi
-if [[ -n "$KEY_ONLY_USER" ]]; then
-    [[ $CONFIRM_KEY_LOGIN -eq 1 ]] || \
-        die "--enable-key-only requires --confirm-key-login after verifying a second SSH key login."
-    configure_ssh_key_only "$KEY_ONLY_USER"
+    state_checkpoint ssh-x11-forwarding-disabled
 fi
 if [[ $ENABLE_VNC -eq 1 ]]; then
     configure_x11vnc "$VNC_ALLOW" "$VNC_USER" "$VNC_PASSWORD_FILE" "$ALLOW_UNFIREWALLED_VNC" "$NON_INTERACTIVE"
+    state_checkpoint attached-display-vnc
 fi
 if [[ $DISABLE_VNC -eq 1 ]]; then
     disable_x11vnc
+    state_checkpoint attached-display-vnc-disabled
 fi
 
 if [[ $REPAIR_APPARMOR -eq 1 ]]; then
     repair_apparmor
+    state_checkpoint apparmor-repair
+fi
+
+if selection_has videokiosk2; then
+    provision_debian_kiosk_desktop "$KIOSK_USER"
 fi
 
 for service_id in "${SELECTED_SERVICES[@]}"; do
     run_service_installer "$service_id"
+    state_checkpoint "service-$service_id"
 done
 
 if [[ $CONFIGURE_APPARMOR -eq 1 ]]; then
     repair_apparmor
+    state_checkpoint apparmor-configure
+fi
+
+if [[ $DESKTOP_REBOOT_REQUIRED -eq 1 ]]; then
+    info "Reboot this host to start the LightDM/Openbox kiosk session."
 fi
 
 info "Installation completed."

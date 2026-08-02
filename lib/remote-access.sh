@@ -3,7 +3,6 @@
 REMOTE_CONFIG_DIR="${REMOTE_CONFIG_DIR:-/etc/church-service-installer}"
 SSH_DROPIN_DIR="${SSH_DROPIN_DIR:-/etc/ssh/sshd_config.d}"
 SSH_X11_DROPIN="$SSH_DROPIN_DIR/90-church-service-installer-x11.conf"
-SSH_KEY_ONLY_DROPIN="$SSH_DROPIN_DIR/91-church-service-installer-key-only.conf"
 VNC_PASSWORD_PATH="$REMOTE_CONFIG_DIR/x11vnc.pass"
 VNC_ENV_PATH="$REMOTE_CONFIG_DIR/x11vnc.env"
 VNC_SERVICE_PATH="${VNC_SERVICE_PATH:-/etc/systemd/system/church-service-installer-x11vnc.service}"
@@ -41,27 +40,6 @@ disable_ssh_x11_forwarding() {
     rm -f "$SSH_X11_DROPIN"
     reload_ssh
     info "Installer-managed SSH X11 forwarding is disabled."
-}
-
-configure_ssh_key_only() {
-    local management_user="$1"
-    local user_home
-
-    [[ "$management_user" != "root" ]] || die "Refusing to configure key-only SSH access for root."
-    id "$management_user" >/dev/null 2>&1 || die "Unknown management user: $management_user"
-    user_home=$(getent passwd "$management_user" | cut -d: -f6)
-    [[ -n "$user_home" && -r "$user_home/.ssh/authorized_keys" ]] || \
-        die "$management_user has no readable authorized_keys file."
-
-    mkdir -p "$SSH_DROPIN_DIR"
-    cat > "$SSH_KEY_ONLY_DROPIN" <<'EOF'
-# Managed by church-service-installer. Console access is required for recovery.
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-EOF
-    chmod 644 "$SSH_KEY_ONLY_DROPIN"
-    reload_ssh
-    info "SSH password authentication is disabled for new sessions."
 }
 
 prompt_vnc_password() {
