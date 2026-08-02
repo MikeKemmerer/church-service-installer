@@ -342,6 +342,21 @@ has_host_actions() {
     $ENABLE_VNC -eq 1 || $DISABLE_VNC -eq 1 ]]
 }
 
+confirmation_prompt() {
+    if [[ ${#SELECTED_SERVICES[@]} -eq 1 ]] && \
+        selection_has "church-monitoring-client" && \
+        ! has_host_actions && \
+        [[ $REPAIR_APPARMOR -eq 0 && $CONFIGURE_APPARMOR -eq 0 ]]; then
+        printf '%s' "Install Church Monitoring Client and its Apache/collector components now? This does not change Video Kiosk, VLC, Falkon, audio, or desktop settings. [y/N] "
+    elif [[ ${#SELECTED_SERVICES[@]} -gt 0 ]] && has_host_actions; then
+        printf '%s' "Apply the selected service installations and requested host changes now? [y/N] "
+    elif [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
+        printf '%s' "Install the selected services now? [y/N] "
+    else
+        printf '%s' "Apply the requested host changes now? [y/N] "
+    fi
+}
+
 print_plan() {
     local service_id
     echo "Platform: $PLATFORM_LABEL ($PLATFORM_ARCH)"
@@ -712,7 +727,7 @@ state_init
 trap state_exit_trap EXIT
 
 if [[ $ASSUME_YES -eq 0 ]]; then
-    read -r -p "Apply the requested service and host changes now? [y/N] " confirmation
+    read -r -p "$(confirmation_prompt)" confirmation
     [[ "$confirmation" =~ ^[Yy]([Ee][Ss])?$ ]] || die "Cancelled."
 fi
 

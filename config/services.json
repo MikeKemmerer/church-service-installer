@@ -43,7 +43,7 @@
       "role": "monitoring agent",
       "repository": "https://github.com/MikeKemmerer/church-monitoring.git",
       "branch": "master",
-      "installer": ["./client/install.sh"],
+      "installer": ["bash", "client/install.sh"],
       "platforms": ["raspbian", "debian"]
     }
   ]
